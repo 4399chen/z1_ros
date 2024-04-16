@@ -20,6 +20,7 @@
 using namespace UNITREE_ARM;
 
 std::vector<cv::Mat> R_gripper2base, t_gripper2base;
+std::vector<cv::Mat> R_base2gripper, t_base2gripper;
 std::vector<cv::Mat> R_target2cam, t_target2cam;
 
 class Z1ARM : public unitreeArm{
@@ -88,7 +89,7 @@ void Z1ARM::collectData(const std::vector<Vec6>& targetPositions, double speed) 
 
     for (const auto& pos : targetPositions) {
         moveJ(pos, speed);
-        std::this_thread::sleep_for(std::chrono::seconds(1)); // 等待机械臂移动到位
+        std::this_thread::sleep_for(std::chrono::seconds(2)); // 等待机械臂移动到位
 
         // 用于存储多次测量的累积变换
         Eigen::Vector3d sum_translation(0, 0, 0);
@@ -98,7 +99,7 @@ void Z1ARM::collectData(const std::vector<Vec6>& targetPositions, double speed) 
         auto startTime = std::chrono::steady_clock::now();
         while(std::chrono::steady_clock::now() - startTime < std::chrono::seconds(3)) {
             try {
-                geometry_msgs::TransformStamped cameraToTagTransform = tfBuffer.lookupTransform("camera_color_frame", "tag_1", ros::Time(0), ros::Duration(3.0));
+                geometry_msgs::TransformStamped cameraToTagTransform = tfBuffer.lookupTransform("camera_color_frame", "tag_1", ros::Time(0), ros::Duration(3));
                 
                 Eigen::Matrix4d transformMatrix = tf2::transformToEigen(cameraToTagTransform.transform).matrix();
                 
@@ -159,14 +160,8 @@ int main(int argc, char** argv) {
 
     arm.backToStart();
 
-    // 定义目标位置和参数
-    // std::vector<Vec6> targetPositions = {
-    //     (Vec6() <<  0.0,  0.4,  0.0,  0.30, -0.30,  0.40).finished(),
-    //     (Vec6() <<  0.2,  0.4,  0.0,  0.30,  0.00,  0.40).finished()
-    // };
-
     // 从CSV文件加载目标位置
-    std::vector<Vec6> targetPositions = arm.loadTargetPositionsFromCSV("/home/work/catkin_ws/src/z1_ros/config/1.cvs");
+    std::vector<Vec6> targetPositions = arm.loadTargetPositionsFromCSV("/home/work/catkin_ws/src/z1_ros/config/2.cvs");
 
     double speed = 2.0; // 示例速度
 
@@ -176,34 +171,73 @@ int main(int argc, char** argv) {
     arm.setFsm(ArmFSMState::PASSIVE);
     arm.sendRecvThread->shutdown();
 
+    // for (const auto& pos : targetPositions) {
+    //     Eigen::Matrix<double, 3, 3> rotationMatrix;
+    //     rotationMatrix = Eigen::AngleAxisd(pos(0), Eigen::Vector3d::UnitX())
+    //                    * Eigen::AngleAxisd(pos(1), Eigen::Vector3d::UnitY())
+    //                    * Eigen::AngleAxisd(pos(2), Eigen::Vector3d::UnitZ());
+
+    //     cv::Mat cv_R(3, 3, CV_64F);
+    //     cv::Mat cv_t(3, 1, CV_64F);
+
+    //     for (int i = 0; i < 3; ++i) {
+    //         for (int j = 0; j < 3; ++j) {
+    //             cv_R.at<double>(i, j) = rotationMatrix(i, j);
+    //         }
+    //         cv_t.at<double>(i, 0) = pos(i + 3);
+    //     }
+
+    //     cv::Mat R_vec;
+    //     cv::Rodrigues(cv_R, R_vec); // Convert rotation matrix to Rodrigues vector
+
+    //     R_gripper2base.push_back(R_vec.clone());
+    //     t_gripper2base.push_back(cv_t.clone());
+    // }
+
     for (const auto& pos : targetPositions) {
         Eigen::Matrix<double, 3, 3> rotationMatrix;
         rotationMatrix = Eigen::AngleAxisd(pos(0), Eigen::Vector3d::UnitX())
-                       * Eigen::AngleAxisd(pos(1), Eigen::Vector3d::UnitY())
-                       * Eigen::AngleAxisd(pos(2), Eigen::Vector3d::UnitZ());
+                    * Eigen::AngleAxisd(pos(1), Eigen::Vector3d::UnitY())
+                    * Eigen::AngleAxisd(pos(2), Eigen::Vector3d::UnitZ());
+
+        // 逆旋转矩阵是原旋转矩阵的转置
+        Eigen::Matrix<double, 3, 3> invRotationMatrix = rotationMatrix.transpose();
 
         cv::Mat cv_R(3, 3, CV_64F);
         cv::Mat cv_t(3, 1, CV_64F);
+        cv::Mat inv_cv_R(3, 3, CV_64F);
+        cv::Mat inv_cv_t(3, 1, CV_64F);
 
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j < 3; ++j) {
                 cv_R.at<double>(i, j) = rotationMatrix(i, j);
+                inv_cv_R.at<double>(i, j) = invRotationMatrix(i, j);
             }
             cv_t.at<double>(i, 0) = pos(i + 3);
         }
 
+        // 计算逆平移向量
+        inv_cv_t = -inv_cv_R * cv_t;
+
         cv::Mat R_vec;
-        cv::Rodrigues(cv_R, R_vec); // Convert rotation matrix to Rodrigues vector
+        cv::Mat inv_R_vec;
+        cv::Rodrigues(cv_R, R_vec); // 转换原始旋转矩阵为Rodrigues向量
+        cv::Rodrigues(inv_cv_R, inv_R_vec); // 转换逆旋转矩阵为Rodrigues向量
 
         R_gripper2base.push_back(R_vec.clone());
         t_gripper2base.push_back(cv_t.clone());
+        R_base2gripper.push_back(inv_R_vec.clone());
+        t_base2gripper.push_back(inv_cv_t.clone());
     }
 
+
+
+
     // 在验证之前打印各个向量的大小
-    // std::cout << "R_gripper2base.size(): " << R_gripper2base.size() << std::endl;
-    // std::cout << "t_gripper2base.size(): " << t_gripper2base.size() << std::endl;
-    // std::cout << "R_target2cam.size(): " << R_target2cam.size() << std::endl;
-    // std::cout << "t_target2cam.size(): " << t_target2cam.size() << std::endl;
+    std::cout << "R_base2gripper.size(): " << R_base2gripper.size() << std::endl;
+    std::cout << "t_base2gripper.size(): " << t_base2gripper.size() << std::endl;
+    std::cout << "R_target2cam.size(): " << R_target2cam.size() << std::endl;
+    std::cout << "t_target2cam.size(): " << t_target2cam.size() << std::endl;
 
     cv::Mat R_cam2gripper, t_cam2gripper;
 
@@ -215,38 +249,26 @@ int main(int argc, char** argv) {
         return -1; // 或者选择其他的错误处理方式
     } else {
         
+        // cv::calibrateHandEye(
+        //     R_gripper2base, t_gripper2base, 
+        //     R_target2cam, t_target2cam, 
+        //     R_cam2gripper, t_cam2gripper, 
+        //     cv::CALIB_HAND_EYE_TSAI
+        //     // cv::CALIB_HAND_EYE_PARK
+        //     // cv::CALIB_HAND_EYE_HORAUD 
+        //     // cv::CALIB_HAND_EYE_ANDREFF 
+        //     // cv::CALIB_HAND_EYE_DANIILIDIS 
+        // );
         cv::calibrateHandEye(
-            R_gripper2base, t_gripper2base, 
+            R_base2gripper, t_base2gripper,
             R_target2cam, t_target2cam, 
             R_cam2gripper, t_cam2gripper, 
-            // cv::CALIB_HAND_EYE_TSAI
+            cv::CALIB_HAND_EYE_TSAI
             // cv::CALIB_HAND_EYE_PARK
-            cv::CALIB_HAND_EYE_HORAUD 
+            // cv::CALIB_HAND_EYE_HORAUD 
             // cv::CALIB_HAND_EYE_ANDREFF 
             // cv::CALIB_HAND_EYE_DANIILIDIS 
         );
-
-
-        // Enumerator
-        // CALIB_HAND_EYE_TSAI 
-        // Python: cv.CALIB_HAND_EYE_TSAI
-        // A New Technique for Fully Autonomous and Efficient 3D Robotics Hand/Eye Calibration [269].
-
-        // CALIB_HAND_EYE_PARK 
-        // Python: cv.CALIB_HAND_EYE_PARK
-        // Robot Sensor Calibration: Solving AX = XB on the Euclidean Group [208].
-
-        // CALIB_HAND_EYE_HORAUD 
-        // Python: cv.CALIB_HAND_EYE_HORAUD
-        // Hand-eye Calibration [124].
-
-        // CALIB_HAND_EYE_ANDREFF 
-        // Python: cv.CALIB_HAND_EYE_ANDREFF
-        // On-line Hand-Eye Calibration [12].
-
-        // CALIB_HAND_EYE_DANIILIDIS 
-        // Python: cv.CALIB_HAND_EYE_DANIILIDIS
-        // Hand-Eye Calibration Using Dual Quaternions [63].
 
         // 打印结果
         std::cout << "R_cam2gripper: \n" << R_cam2gripper << std::endl;

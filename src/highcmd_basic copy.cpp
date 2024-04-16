@@ -14,7 +14,6 @@
 #include <Eigen/SVD>
 #include <opencv2/core.hpp>
 #include <opencv2/calib3d.hpp>
-#include <opencv2/core/eigen.hpp>
 #include <string>
 
 using namespace UNITREE_ARM;
@@ -24,33 +23,39 @@ std::vector<cv::Mat> R_target2cam, t_target2cam;
 
 class Z1ARM : public unitreeArm{
 public:
+    // Z1ARM():unitreeArm(true){};
     Z1ARM():unitreeArm(false){};
     ~Z1ARM(){};
 
-    void moveJ(const Vec6& targetPos, double speed);
-    void moveL(const Vec6& targetPos, double speed);
-    void moveC(const Vec6& viaPoint, const Vec6& targetPos, double speed);
+    void moveJ(const Vec6& targetPos, double gripperPos, double speed);
+    void moveL(const Vec6& targetPos, double gripperPos, double speed);
+    void moveC(const Vec6& viaPoint, const Vec6& targetPos, double gripperPos, double speed);
 
     void printState();
 
-    void collectData(const std::vector<Vec6>& targetPositions, double speed);
+    void collectData(const std::vector<Vec6>& targetPositions, double gripperPos, double speed);
     
     std::vector<Vec6> loadTargetPositionsFromCSV(const std::string& filename);
+private:
+    double gripper_pos = 0.0;
+    double joint_speed = 2.0;
+    double cartesian_speed = 0.5;
 };
 
-void Z1ARM::moveJ(const Vec6& targetPos, double speed) {
+void Z1ARM::moveJ(const Vec6& targetPos, double gripperPos, double speed) {
     std::cout << "[MOVEJ]" << std::endl;
+    // MoveJ(targetPos, gripperPos, speed);
     MoveJ(targetPos, speed);
 }
 
-void Z1ARM::moveL(const Vec6& targetPos, double speed) {
+void Z1ARM::moveL(const Vec6& targetPos, double gripperPos, double speed) {
     std::cout << "[MOVEL]" << std::endl;
-    MoveL(targetPos, speed);
+    MoveL(targetPos, gripperPos, speed);
 }
 
-void Z1ARM::moveC(const Vec6& viaPoint, const Vec6& targetPos, double speed) {
+void Z1ARM::moveC(const Vec6& viaPoint, const Vec6& targetPos, double gripperPos, double speed) {
     std::cout << "[MOVEC]" << std::endl;
-    MoveC(viaPoint, targetPos, speed);
+    MoveC(viaPoint, targetPos, gripperPos, speed);
 }
 
 void Z1ARM::printState(){
@@ -81,57 +86,27 @@ std::vector<Vec6> Z1ARM::loadTargetPositionsFromCSV(const std::string& filename)
     return targetPositions;
 }
 
-void Z1ARM::collectData(const std::vector<Vec6>& targetPositions, double speed) {
+// 数据收集函数的实现
+void Z1ARM::collectData(const std::vector<Vec6>& targetPositions, double gripperPos, double speed) {
     tf2_ros::Buffer tfBuffer;
     tf2_ros::TransformListener tfListener(tfBuffer);
     ros::Duration(2.0).sleep(); // 等待TF缓存
 
     for (const auto& pos : targetPositions) {
-        moveJ(pos, speed);
+        moveJ(pos, gripperPos, speed);
         std::this_thread::sleep_for(std::chrono::seconds(1)); // 等待机械臂移动到位
 
-        // 用于存储多次测量的累积变换
-        Eigen::Vector3d sum_translation(0, 0, 0);
-        Eigen::Matrix3d sum_rotation(Eigen::Matrix3d::Zero());
-        int count = 0;
-
-        auto startTime = std::chrono::steady_clock::now();
-        while(std::chrono::steady_clock::now() - startTime < std::chrono::seconds(3)) {
-            try {
-                geometry_msgs::TransformStamped cameraToTagTransform = tfBuffer.lookupTransform("camera_color_frame", "tag_1", ros::Time(0), ros::Duration(3.0));
-                
-                Eigen::Matrix4d transformMatrix = tf2::transformToEigen(cameraToTagTransform.transform).matrix();
-                
-                Eigen::Vector3d translation(transformMatrix.block<3,1>(0,3));
-                Eigen::Matrix3d rotation(transformMatrix.block<3,3>(0,0));
-
-                // 累加变换
-                sum_translation += translation;
-                sum_rotation += rotation;
-                count++;
-            } catch (const tf2::TransformException& ex) {
-                ROS_WARN("%s", ex.what());
-                continue; // 如果这次查询失败，则继续尝试
-            }
-
-            // 稍作延迟，减少查询频率
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-
-        if (count > 0) {
-            // 计算平均变换
-            Eigen::Vector3d avg_translation = sum_translation / count;
-            Eigen::Matrix3d avg_rotation = sum_rotation / count;
-
-            // 将Eigen转换为OpenCV格式
+        try {
+            geometry_msgs::TransformStamped cameraToTagTransform = tfBuffer.lookupTransform("camera_color_frame", "tag_1", ros::Time(0), ros::Duration(1.0));
+            
+            Eigen::Matrix4d transformMatrix = tf2::transformToEigen(cameraToTagTransform.transform).matrix();
             cv::Mat cv_matrix(4, 4, CV_64F);
-            for (int i = 0; i < 3; ++i) {
-                for (int j = 0; j < 3; ++j) {
-                    cv_matrix.at<double>(i, j) = avg_rotation(i, j);
+
+            for (int i = 0; i < 4; ++i) {
+                for (int j = 0; j < 4; ++j) {
+                    cv_matrix.at<double>(i, j) = transformMatrix(i, j);
                 }
-                cv_matrix.at<double>(i, 3) = avg_translation(i);
             }
-            for (int j = 0; j < 4; ++j) cv_matrix.at<double>(3, j) = (j == 3) ? 1 : 0;
 
             cv::Mat R, t;
             cv::Rodrigues(cv_matrix(cv::Rect(0, 0, 3, 3)), R); // 旋转矩阵转换为罗德里格斯向量
@@ -139,19 +114,16 @@ void Z1ARM::collectData(const std::vector<Vec6>& targetPositions, double speed) 
 
             R_target2cam.push_back(R);
             t_target2cam.push_back(t);
-        } else {
-            ROS_WARN("没有有效的TF变换被收集到。");
+        } catch (const tf2::TransformException& ex) {
+            ROS_WARN("%s", ex.what());
+            continue; // 如果这次查询失败，则继续下一次循环
         }
     }
 }
 
-
 int main(int argc, char** argv) {
     ros::init(argc, argv, "z1arm_node"); // 初始化ROS节点
     ros::NodeHandle nh;
-
-    tf2_ros::Buffer tfBuffer;
-    tf2_ros::TransformListener tfListener(tfBuffer);
 
     std::cout << std::fixed << std::setprecision(3);
     Z1ARM arm;
@@ -168,9 +140,10 @@ int main(int argc, char** argv) {
     // 从CSV文件加载目标位置
     std::vector<Vec6> targetPositions = arm.loadTargetPositionsFromCSV("/home/work/catkin_ws/src/z1_ros/config/1.cvs");
 
-    double speed = 2.0; // 示例速度
+    double gripperPos = 0.0; // 示例夹持器位置
+    double speed = 0.5; // 示例速度
 
-    arm.collectData(targetPositions, speed);
+    arm.collectData(targetPositions, gripperPos, speed);
 
     arm.backToStart();
     arm.setFsm(ArmFSMState::PASSIVE);
@@ -199,14 +172,6 @@ int main(int argc, char** argv) {
         t_gripper2base.push_back(cv_t.clone());
     }
 
-    // 在验证之前打印各个向量的大小
-    // std::cout << "R_gripper2base.size(): " << R_gripper2base.size() << std::endl;
-    // std::cout << "t_gripper2base.size(): " << t_gripper2base.size() << std::endl;
-    // std::cout << "R_target2cam.size(): " << R_target2cam.size() << std::endl;
-    // std::cout << "t_target2cam.size(): " << t_target2cam.size() << std::endl;
-
-    cv::Mat R_cam2gripper, t_cam2gripper;
-
     // 验证R_gripper2base, t_gripper2base, R_target2cam, t_target2cam数量是否相符
     if (R_gripper2base.size() != t_gripper2base.size() || 
         R_gripper2base.size() != R_target2cam.size() || 
@@ -214,44 +179,19 @@ int main(int argc, char** argv) {
         std::cerr << "错误: R_gripper2base, t_gripper2base, R_target2cam, 和 t_target2cam 的数量不一致。" << std::endl;
         return -1; // 或者选择其他的错误处理方式
     } else {
-        
+        cv::Mat R_cam2gripper, t_cam2gripper;
         cv::calibrateHandEye(
             R_gripper2base, t_gripper2base, 
             R_target2cam, t_target2cam, 
             R_cam2gripper, t_cam2gripper, 
-            // cv::CALIB_HAND_EYE_TSAI
-            // cv::CALIB_HAND_EYE_PARK
-            cv::CALIB_HAND_EYE_HORAUD 
-            // cv::CALIB_HAND_EYE_ANDREFF 
-            // cv::CALIB_HAND_EYE_DANIILIDIS 
+            cv::CALIB_HAND_EYE_TSAI
         );
-
-
-        // Enumerator
-        // CALIB_HAND_EYE_TSAI 
-        // Python: cv.CALIB_HAND_EYE_TSAI
-        // A New Technique for Fully Autonomous and Efficient 3D Robotics Hand/Eye Calibration [269].
-
-        // CALIB_HAND_EYE_PARK 
-        // Python: cv.CALIB_HAND_EYE_PARK
-        // Robot Sensor Calibration: Solving AX = XB on the Euclidean Group [208].
-
-        // CALIB_HAND_EYE_HORAUD 
-        // Python: cv.CALIB_HAND_EYE_HORAUD
-        // Hand-eye Calibration [124].
-
-        // CALIB_HAND_EYE_ANDREFF 
-        // Python: cv.CALIB_HAND_EYE_ANDREFF
-        // On-line Hand-Eye Calibration [12].
-
-        // CALIB_HAND_EYE_DANIILIDIS 
-        // Python: cv.CALIB_HAND_EYE_DANIILIDIS
-        // Hand-Eye Calibration Using Dual Quaternions [63].
 
         // 打印结果
         std::cout << "R_cam2gripper: \n" << R_cam2gripper << std::endl;
         std::cout << "t_cam2gripper: \n" << t_cam2gripper << std::endl;
     }
+
 
     return 0;
 }
