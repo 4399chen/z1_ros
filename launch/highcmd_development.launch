@@ -3,5 +3,5 @@
     <node name="z1_ctrl" pkg="z1_ros" type="start_z1_ctrl.sh" output="screen" required="true"/>
 
     <!-- 启动ROS节点 -->
-    <node name="eye_in_hand_calibration_node" pkg="z1_ros" type="eye_in_hand_calibration" output="screen" required="true"/>
+    <node name="highcmd_development_node" pkg="z1_ros" type="highcmd_development" output="screen" required="true"/>
 </launch>

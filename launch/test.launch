@@ -1,0 +1,9 @@
+<launch>
+    <include file="$(find realsense2_camera)/launch/rs_camera.launch"/>
+
+    <include file="$(find apriltag_ros)/launch/continuous_detection.launch"/>
+
+    <include file="$(find my_tf_transformer)/launch/transformer.launch"/>
+
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find z1_ros)/rviz/1.rviz" />
+</launch>
